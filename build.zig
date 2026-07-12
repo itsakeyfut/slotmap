@@ -10,10 +10,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const exe = b.addExecutable(.{
-        .name = "slotmap",
+    // Example: examples/basic.zig — a small demo of the public API.
+    const example = b.addExecutable(.{
+        .name = "basic",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("examples/basic.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -21,27 +22,21 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(exe);
+    b.installArtifact(example);
 
-    // Executable binary
-    const run_exe = b.addRunArtifact(exe);
+    const run_example = b.addRunArtifact(example);
     if (b.args) |args| {
-        run_exe.addArgs(args);
+        run_example.addArgs(args);
     }
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_exe.step);
-    run_exe.step.dependOn(b.getInstallStep());
+    const example_step = b.step("examples", "Build and run the basic example");
+    example_step.dependOn(&run_example.step);
+    run_example.step.dependOn(b.getInstallStep());
 
     // Test
     const mod_tests = b.addTest(.{
         .root_module = slotmap_mod,
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
-    const run_exe_tests = b.addRunArtifact(exe_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
 }
