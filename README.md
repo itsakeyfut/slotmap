@@ -143,6 +143,13 @@ match a live slot: either the value was removed, or the slot has since been reus
 newer generation. This is the core guarantee — a stale handle can never read or mutate
 an unrelated value.
 
+## Design
+
+This library favors reliability over feature count, and grows only when real use
+demands it. [`docs/DESIGN.md`](docs/DESIGN.md) records the rationale behind the
+current design, the trade-offs chosen, and the conditions under which each will be
+revisited.
+
 ## License
 
 [MIT](LICENSE) © itsakeyfut
