@@ -299,3 +299,29 @@ test "generation wraps from maxInt to 0 and still rejects the stale key" {
     try testing.expect(m.get(kmax) == null); // old maxInt key rejected vs gen 0
     try testing.expectEqual(@as(?u32, 20), m.get(k2));
 }
+
+test "insert failure during grow is atomic: state survives and recovers" {
+    var fa = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    var m = try SlotMap(u32).init(fa.allocator());
+    defer m.deinit();
+
+    const Key = SlotMap(u32).Key;
+    var keys: [8]Key = undefined;
+    // Inserts 1..8 succeed (grow 0->8 is the single allowed allocation).
+    for (0..8) |i| keys[i] = try m.insert(@intCast(i));
+    try testing.expectEqual(@as(usize, 8), m.count());
+
+    // Insert 9 forces grow 8->16, which the failing allocator rejects.
+    try testing.expectError(error.OutOfMemory, m.insert(99));
+
+    // Core invariant: failure did not corrupt state.
+    try testing.expectEqual(@as(usize, 8), m.count());
+    for (0..8) |i| try testing.expectEqual(@as(?u32, @intCast(i)), m.get(keys[i]));
+
+    // Recovery (white-box): swap to a healthy allocator; further inserts work.
+    // (FailingAllocator is sticky, so the same instance cannot recover.)
+    m.allocator = testing.allocator;
+    const k9 = try m.insert(99);
+    try testing.expectEqual(@as(usize, 9), m.count());
+    try testing.expectEqual(@as(?u32, 99), m.get(k9));
+}
