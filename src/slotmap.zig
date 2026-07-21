@@ -273,3 +273,29 @@ test "iterator reflects removals and empties fully" {
     var it2 = m.iterator();
     try testing.expect(it2.next() == null);
 }
+
+test "generation wraps from maxInt to 0 and still rejects the stale key" {
+    // White-box: forcing a real 2^32-cycle wrap is infeasible, so we set the
+    // slot's generation to maxInt directly and exercise the wrap boundary.
+    // This documents the CURRENT behavior (wrap -> 0) and the immediate-reuse
+    // safety. The astronomically-rare true ABA collision (a key from 2^32
+    // reuse cycles ago) cannot be reproduced in bounded time and is out of scope.
+    const Key = SlotMap(u32).Key;
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    const k = try m.insert(10);
+    m.slots[k.index].generation = std.math.maxInt(u32);
+    const kmax = Key{ .index = k.index, .generation = std.math.maxInt(u32) };
+    try testing.expect(m.contains(kmax));
+
+    _ = m.remove(kmax); // generation: maxInt +% 1 == 0
+    try testing.expectEqual(@as(u32, 0), m.slots[kmax.index].generation);
+    try testing.expect(!m.contains(kmax));
+
+    const k2 = try m.insert(20); // reuses the slot; generation is now 0
+    try testing.expectEqual(@as(u32, 0), k2.generation);
+    try testing.expect(m.contains(k2));
+    try testing.expect(m.get(kmax) == null); // old maxInt key rejected vs gen 0
+    try testing.expectEqual(@as(?u32, 20), m.get(k2));
+}
