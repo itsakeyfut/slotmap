@@ -50,17 +50,22 @@ are recycled through an intrusive free list (`free_head` + `next_free`).
 
 ### Generational keys (`index: u32`, `generation: u32`)
 
-- Fresh slots start at generation `1`; `remove` does `generation +%= 1` (wrapping).
+- Fresh slots start at generation `1`; `remove` does `generation +%= 1` (wrapping),
+  but skips `0` on wrap, permanently reserving it — so no live slot ever has
+  generation `0` and `Key{ _, 0 }` is unconditionally invalid.
 - The key is 8 bytes, trivially copyable, and safe to store anywhere.
 - **Capacity bound:** indices are `u32`, and `maxInt(u32)` is reserved as the
   free-list `nil` sentinel, so the map holds up to ~2³² slots. Far beyond any
   realistic use; noted only for completeness.
-- **Generation wraparound (ABA):** because generation is `u32`, removing and reusing
-  *the same slot* 2³² times wraps it back to a previously issued value. A key that
-  old would then alias a live entry. This is a theoretical soundness limit, not a
-  practical concern for game-scale workloads. Revisit only if a workload could
-  plausibly approach billions of reuse cycles on a single slot (see *Packed u64
-  keys*, which would make this bound **worse**, and *Reserved null key*).
+- **Generation wraparound (ABA):** because generation is `u32` and `0` is reserved,
+  removing and reusing *the same slot* 2³² − 1 times wraps it back to a previously
+  issued (non-zero) value. A key that old would then alias a live entry. Reserving
+  `0` makes this period one shorter — a negligible, *slightly worse* ABA bound, not
+  an improvement; its purpose is to make "no live slot has generation `0`" an
+  unconditional invariant, not to strengthen ABA. This remains a theoretical
+  soundness limit, not a practical concern for game-scale workloads. Revisit only if
+  a workload could plausibly approach billions of reuse cycles on a single slot (see
+  *Packed u64 keys*, which would make this bound **worse**, and *Reserved null key*).
 
 ### Growth by doubling
 
@@ -99,14 +104,15 @@ failible surface this small is intentional and worth preserving.
 | **Segmented / chunked backing store** | Pointers stay valid across inserts (no realloc) | More complex indexing, slightly slower access | The "pointer dangles across insert" limitation causes real bugs or friction in engine code. |
 | **Packed `u64` keys** | Single-word handles, cheaper to store en masse | Caps index/generation bit-widths; bit-twiddling; **shrinks the generation space, worsening the ABA bound** | Storing very large numbers of handles becomes a measured memory problem. |
 | **Secondary maps** (attach extra per-key data outside the primary store) | Rust's `SecondaryMap` use case | Copying Rust's API may not be the right Zig shape | A concrete need appears. Prefer a Zig-native answer first — a parallel `SlotMap`, a `std.AutoHashMap` keyed by `Key`, or `comptime` composition — before porting another library's design. |
-| **Reserved null key (`Key.none`)** | An in-band "no entity" value without `?Key`'s size cost | Steals one generation value; adds a wrap special-case | A use case needs to embed nullable handles compactly. See note below. |
+| **Reserved null key (`Key.none`)** | An in-band "no entity" value without `?Key`'s size cost | Steals one generation value; adds a wrap special-case | A use case needs to embed nullable handles compactly. The prerequisite (generation `0` reserved) is now in place, but the `Key.none` API is deliberately **not** exposed. See note below. |
 
-**On the null key.** There is currently no canonical invalid key; the Zig-idiomatic
-choice is `?Key`. Generation starts at `1`, so `Key{ _, 0 }` is *almost* always
-invalid — but not guaranteed, because generation can wrap to `0`. If a compact null
-is ever wanted, reserve generation `0` permanently (skip `0` when wrapping in
-`remove`) so `Key{ _, 0 }` becomes a guaranteed-invalid `Key.none`. Until then,
-prefer `?Key`.
+**On the null key.** There is no canonical invalid key exposed; the Zig-idiomatic
+choice is `?Key`, and it stays the recommendation. Generation `0` is now permanently
+reserved (`remove` skips `0` on wrap), so `Key{ _, 0 }` is *unconditionally* invalid.
+This is internal hardening only: it is the prerequisite for a compact `Key.none`
+should the firing condition above ever be met, but no such sentinel is exposed or
+advertised, and callers should not build handles on the reserved value. Until a
+concrete compact-null need appears, prefer `?Key`.
 
 ## Features under consideration
 
