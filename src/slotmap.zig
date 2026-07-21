@@ -195,3 +195,47 @@ test "iterator visits only live entries" {
     _ = a;
     _ = c;
 }
+
+test "double remove returns null and does not double-decrement count" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    const a = try m.insert(10);
+    const b = try m.insert(20);
+    try testing.expectEqual(@as(usize, 2), m.count());
+
+    try testing.expectEqual(@as(?u32, 10), m.remove(a));
+    try testing.expectEqual(@as(usize, 1), m.count());
+
+    // Second remove of the same (now stale) key is a no-op.
+    try testing.expect(m.remove(a) == null);
+    try testing.expectEqual(@as(usize, 1), m.count());
+
+    // b is unaffected.
+    try testing.expectEqual(@as(?u32, 20), m.get(b));
+}
+
+test "stale key is rejected by every accessor, including after slot reuse" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    const k = try m.insert(10);
+    _ = m.remove(k);
+
+    // Directly after removal: all accessors reject the stale key.
+    try testing.expect(m.get(k) == null);
+    try testing.expect(m.getPtr(k) == null);
+    try testing.expect(!m.contains(k));
+    try testing.expect(m.remove(k) == null);
+
+    // Reuse the slot with a new generation, then re-check the old key.
+    const k2 = try m.insert(20);
+    try testing.expectEqual(k.index, k2.index);
+    try testing.expect(k.generation != k2.generation);
+    try testing.expect(m.get(k) == null);
+    try testing.expect(m.getPtr(k) == null);
+    try testing.expect(!m.contains(k));
+    try testing.expect(m.remove(k) == null);
+    // The new key still works.
+    try testing.expectEqual(@as(?u32, 20), m.get(k2));
+}
