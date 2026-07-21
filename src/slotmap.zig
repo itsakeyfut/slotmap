@@ -239,3 +239,37 @@ test "stale key is rejected by every accessor, including after slot reuse" {
     // The new key still works.
     try testing.expectEqual(@as(?u32, 20), m.get(k2));
 }
+
+test "iterator reflects removals and empties fully" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    const a = try m.insert(1);
+    const b = try m.insert(2);
+    const c = try m.insert(3);
+    const d = try m.insert(4);
+    _ = m.remove(b);
+    _ = m.remove(d);
+
+    // Only live entries (a=1, c=3) are visited, with correct values.
+    var sum: u32 = 0;
+    var n: usize = 0;
+    var it = m.iterator();
+    while (it.next()) |e| {
+        try testing.expect(m.contains(e.key));
+        sum += e.value_ptr.*;
+        n += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), n);
+    try testing.expectEqual(m.count(), n);
+    try testing.expectEqual(@as(u32, 4), sum); // 1 + 3
+    _ = a;
+    _ = c;
+
+    // After removing everything, the iterator yields nothing immediately.
+    var drain_it = m.iterator();
+    while (drain_it.next()) |e| _ = m.remove(e.key);
+    try testing.expectEqual(@as(usize, 0), m.count());
+    var it2 = m.iterator();
+    try testing.expect(it2.next() == null);
+}
