@@ -325,3 +325,34 @@ test "insert failure during grow is atomic: state survives and recovers" {
     try testing.expectEqual(@as(usize, 9), m.count());
     try testing.expectEqual(@as(?u32, 99), m.get(k9));
 }
+
+test "grow relocates the backing array (pointer-invalidation hazard is real)" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    _ = try m.insert(0); // triggers first grow 0->8
+    // Fill to the growth boundary so the next insert reallocates.
+    while (m.next_fresh < m.slots.len) _ = try m.insert(1);
+    const before = m.slots.ptr;
+    _ = try m.insert(2); // grows 8->16, relocating the array
+    try testing.expect(m.slots.ptr != before);
+}
+
+test "safe pattern: re-fetch getPtr after an insert that grows" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    const k = try m.insert(100);
+    // Read via getPtr (valid now).
+    try testing.expectEqual(@as(u32, 100), m.getPtr(k).?.*);
+
+    // Fill to the growth boundary, then insert to force a reallocation.
+    while (m.next_fresh < m.slots.len) _ = try m.insert(0);
+    _ = try m.insert(0); // reallocates the backing array
+
+    // The recommended pattern: re-fetch after the insert, then it is correct.
+    const p = m.getPtr(k) orelse return error.TestExpectedNonNull;
+    try testing.expectEqual(@as(u32, 100), p.*);
+    p.* = 101;
+    try testing.expectEqual(@as(?u32, 101), m.get(k));
+}
