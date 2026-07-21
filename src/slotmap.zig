@@ -38,13 +38,31 @@ pub fn SlotMap(comptime T: type) type {
             self.* = undefined;
         }
 
-        fn grow(self: *Self) !void {
-            const old_cap = self.slots.len;
-            const new_cap = if (old_cap == 0) 8 else old_cap * 2;
+        fn setCapacity(self: *Self, new_cap: usize) !void {
             const new_slots = try self.allocator.alloc(Slot, new_cap);
-            @memcpy(new_slots[0..old_cap], self.slots[0..old_cap]);
+            @memcpy(new_slots[0..self.slots.len], self.slots);
             self.allocator.free(self.slots);
             self.slots = new_slots;
+        }
+
+        fn grow(self: *Self) !void {
+            const new_cap = if (self.slots.len == 0) 8 else self.slots.len * 2;
+            try self.setCapacity(new_cap);
+        }
+
+        pub fn ensureTotalCapacity(self: *Self, new_capacity: usize) !void {
+            if (new_capacity > self.slots.len) try self.setCapacity(new_capacity);
+        }
+
+        pub fn ensureUnusedCapacity(self: *Self, additional: usize) !void {
+            try self.ensureTotalCapacity(self.live + additional);
+        }
+
+        pub fn initCapacity(allocator: std.mem.Allocator, capacity: usize) !Self {
+            var self = try init(allocator);
+            errdefer self.deinit();
+            try self.ensureTotalCapacity(capacity);
+            return self;
         }
 
         pub fn insert(self: *Self, value: T) !Key {
@@ -412,7 +430,7 @@ test "safe pattern: re-fetch getPtr after an insert that grows" {
 
 const OracleEntry = struct { key: SlotMap(u32).Key, val: u32 };
 
-const Op = enum { insert, remove_live, get_live, getptr_mutate_live, touch_stale, clear };
+const Op = enum { insert, remove_live, get_live, getptr_mutate_live, touch_stale, clear, reserve };
 
 // Drives a random sequence of operations against SlotMap(u32) and checks it
 // against a black-box oracle (a live-key model + a stale-key list). Generic over
@@ -438,7 +456,7 @@ fn runSequence(comptime Source: type, src: *Source, gpa: std.mem.Allocator) !voi
             .touch_stale => if (stale.items.len == 0) {
                 op = .insert;
             },
-            .insert, .clear => {},
+            .insert, .clear, .reserve => {},
         }
 
         switch (op) {
@@ -485,6 +503,11 @@ fn runSequence(comptime Source: type, src: *Source, gpa: std.mem.Allocator) !voi
                 live.clearRetainingCapacity();
                 map.clearRetainingCapacity();
             },
+            .reserve => {
+                // Capacity-only: the oracle is unchanged. Reserve a small amount so
+                // setCapacity is exercised at non-doubling sizes under arbitrary state.
+                try map.ensureUnusedCapacity(src.value() % 16);
+            },
         }
 
         // Invariants after every op.
@@ -519,11 +542,12 @@ const PrngSource = struct {
         return false;
     }
     fn nextOp(self: *PrngSource) Op {
-        // Draw `clear` rarely (~1/20) so sequences build up state between clears;
-        // otherwise pick uniformly among the non-clear ops.
+        // Draw `clear` and `reserve` rarely so sequences build up state between them;
+        // otherwise pick uniformly among the core ops.
         if (self.random.uintLessThan(u32, 20) == 0) return .clear;
-        const non_clear = [_]Op{ .insert, .remove_live, .get_live, .getptr_mutate_live, .touch_stale };
-        return non_clear[self.random.uintLessThan(usize, non_clear.len)];
+        if (self.random.uintLessThan(u32, 15) == 0) return .reserve;
+        const core = [_]Op{ .insert, .remove_live, .get_live, .getptr_mutate_live, .touch_stale };
+        return core[self.random.uintLessThan(usize, core.len)];
     }
     fn value(self: *PrngSource) u32 {
         return self.random.int(u32);
@@ -726,4 +750,70 @@ test "clearRetainingCapacity keeps the allocated capacity" {
     // Re-inserting up to the retained capacity does not reallocate.
     for (0..len_before) |_| _ = try m.insert(0);
     try testing.expectEqual(ptr_before, m.slots.ptr);
+}
+
+test "ensureTotalCapacity pre-allocates so inserts avoid a grow" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    try m.ensureTotalCapacity(100);
+    try testing.expect(m.slots.len >= 100);
+    const ptr = m.slots.ptr;
+    for (0..100) |i| _ = try m.insert(@intCast(i));
+    try testing.expectEqual(ptr, m.slots.ptr); // no reallocation
+    try testing.expectEqual(@as(usize, 100), m.count());
+}
+
+test "ensureTotalCapacity is a no-op when capacity already suffices" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    try m.ensureTotalCapacity(50);
+    const ptr = m.slots.ptr;
+    const len = m.slots.len;
+    try m.ensureTotalCapacity(50); // equal
+    try m.ensureTotalCapacity(10); // smaller — must not shrink
+    try testing.expectEqual(ptr, m.slots.ptr);
+    try testing.expectEqual(len, m.slots.len);
+}
+
+test "ensureUnusedCapacity accounts for the live count" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    var keys: [10]@TypeOf(m).Key = undefined;
+    for (0..10) |i| keys[i] = try m.insert(@intCast(i));
+    _ = m.remove(keys[3]);
+    _ = m.remove(keys[7]);
+    try testing.expectEqual(@as(usize, 8), m.count());
+
+    try m.ensureUnusedCapacity(200);
+    const ptr = m.slots.ptr;
+    for (0..200) |_| _ = try m.insert(0); // 200 grow-free inserts
+    try testing.expectEqual(ptr, m.slots.ptr);
+}
+
+test "initCapacity starts empty with pre-sized capacity" {
+    var m = try SlotMap(u32).initCapacity(testing.allocator, 64);
+    defer m.deinit();
+
+    try testing.expect(m.slots.len >= 64);
+    try testing.expectEqual(@as(usize, 0), m.count());
+    const ptr = m.slots.ptr;
+    for (0..64) |i| _ = try m.insert(@intCast(i));
+    try testing.expectEqual(ptr, m.slots.ptr);
+    try testing.expectEqual(@as(usize, 64), m.count());
+}
+
+test "getPtr survives inserts within reserved capacity" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    const k = try m.insert(42);
+    try m.ensureUnusedCapacity(100);
+    const p = m.getPtr(k).?;
+    for (0..100) |_| _ = try m.insert(0); // no grow, so p stays valid
+    try testing.expectEqual(@as(u32, 42), p.*);
+    p.* = 43;
+    try testing.expectEqual(@as(?u32, 43), m.get(k));
 }

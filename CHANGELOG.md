@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `const` map.
 - `clearRetainingCapacity()` on `SlotMap(T)`: remove all entries and invalidate every
   outstanding key while keeping the allocated capacity.
+- `ensureTotalCapacity()`, `ensureUnusedCapacity()`, and `initCapacity()` on
+  `SlotMap(T)` for pre-allocating slots, mirroring `std.ArrayList`/`std.HashMap`.
 
 ## [0.1.1] - 2026-07-21
 
