@@ -477,3 +477,33 @@ test "property: random op sequences match the oracle" {
         try runSequence(PrngSource, &src, testing.allocator);
     }
 }
+
+const SmithSource = struct {
+    smith: *std.testing.Smith,
+
+    fn done(self: *SmithSource) bool {
+        // Weighted so most draws continue (~15:1) — longer sequences.
+        return self.smith.eosWeightedSimple(15, 1);
+    }
+    fn nextOp(self: *SmithSource) Op {
+        return self.smith.value(Op);
+    }
+    fn value(self: *SmithSource) u32 {
+        return self.smith.value(u32);
+    }
+    fn index(self: *SmithSource, len: usize) usize {
+        return self.smith.index(len);
+    }
+};
+
+fn fuzzOne(_: void, smith: *std.testing.Smith) anyerror!void {
+    var src = SmithSource{ .smith = smith };
+    try runSequence(SmithSource, &src, testing.allocator);
+}
+
+test "fuzz: random op sequences match the oracle" {
+    // Under plain `zig build test` this replays only the empty smoke input
+    // (0 ops) on all platforms. Real coverage-guided fuzzing runs on Linux via
+    // `zig build test --fuzz=<N>` (see CI). The library stays cross-platform.
+    try std.testing.fuzz({}, fuzzOne, .{});
+}
