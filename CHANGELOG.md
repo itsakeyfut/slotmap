@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `remove` now reserves generation `0` (it skips `0` on wraparound), making the
+  "a live slot never has generation `0`" invariant unconditional. This is internal
+  hardening with no public API change; the recommended way to represent an absent
+  key remains `?Key`.
+
 ## [0.1.0] - 2026-07-12
 
 Initial release.

@@ -87,6 +87,7 @@ pub fn SlotMap(comptime T: type) type {
             const value = slot.value;
             slot.occupied = false;
             slot.generation +%= 1;
+            if (slot.generation == 0) slot.generation = 1; // reserve generation 0
             slot.next_free = self.free_head;
             self.free_head = key.index;
             self.live -= 1;
@@ -274,12 +275,13 @@ test "iterator reflects removals and empties fully" {
     try testing.expect(it2.next() == null);
 }
 
-test "generation wraps from maxInt to 0 and still rejects the stale key" {
-    // White-box: forcing a real 2^32-cycle wrap is infeasible, so we set the
-    // slot's generation to maxInt directly and exercise the wrap boundary.
-    // This documents the CURRENT behavior (wrap -> 0) and the immediate-reuse
-    // safety. The astronomically-rare true ABA collision (a key from 2^32
-    // reuse cycles ago) cannot be reproduced in bounded time and is out of scope.
+test "remove reserves generation 0: wrap goes maxInt to 1" {
+    // White-box: forcing a real wrap is infeasible, so we set the slot's
+    // generation to maxInt directly and exercise the wrap boundary. `remove`
+    // reserves generation 0 (skips it on wrap), so the counter goes maxInt -> 1,
+    // never 0, and no live slot can ever hold generation 0. The astronomically
+    // rare true ABA collision (a key from 2^32 - 1 reuse cycles ago) cannot be
+    // reproduced in bounded time and is out of scope.
     const Key = SlotMap(u32).Key;
     var m = try SlotMap(u32).init(testing.allocator);
     defer m.deinit();
@@ -289,14 +291,24 @@ test "generation wraps from maxInt to 0 and still rejects the stale key" {
     const kmax = Key{ .index = k.index, .generation = std.math.maxInt(u32) };
     try testing.expect(m.contains(kmax));
 
-    _ = m.remove(kmax); // generation: maxInt +% 1 == 0
-    try testing.expectEqual(@as(u32, 0), m.slots[kmax.index].generation);
+    _ = m.remove(kmax); // generation: maxInt +% 1 == 0, then reserved -> 1
+    try testing.expectEqual(@as(u32, 1), m.slots[kmax.index].generation);
     try testing.expect(!m.contains(kmax));
 
-    const k2 = try m.insert(20); // reuses the slot; generation is now 0
-    try testing.expectEqual(@as(u32, 0), k2.generation);
+    const k2 = try m.insert(20); // reuses the slot; generation is 1, never 0
+    try testing.expectEqual(@as(u32, 1), k2.generation);
     try testing.expect(m.contains(k2));
-    try testing.expect(m.get(kmax) == null); // old maxInt key rejected vs gen 0
+    try testing.expect(m.get(kmax) == null); // old maxInt key still rejected
+
+    // The reserved value guards the change: a generation-0 key never matches the
+    // now-live slot. Without the reserve guard the reused slot would have
+    // generation 0 and this Key{ _, 0 } would wrongly match, failing here.
+    const kzero = Key{ .index = k.index, .generation = 0 };
+    try testing.expect(m.get(kzero) == null);
+    try testing.expect(m.getPtr(kzero) == null);
+    try testing.expect(!m.contains(kzero));
+    try testing.expect(m.remove(kzero) == null);
+
     try testing.expectEqual(@as(?u32, 20), m.get(k2));
 }
 
