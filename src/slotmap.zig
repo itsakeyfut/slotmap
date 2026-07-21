@@ -430,7 +430,7 @@ test "safe pattern: re-fetch getPtr after an insert that grows" {
 
 const OracleEntry = struct { key: SlotMap(u32).Key, val: u32 };
 
-const Op = enum { insert, remove_live, get_live, getptr_mutate_live, touch_stale, clear };
+const Op = enum { insert, remove_live, get_live, getptr_mutate_live, touch_stale, clear, reserve };
 
 // Drives a random sequence of operations against SlotMap(u32) and checks it
 // against a black-box oracle (a live-key model + a stale-key list). Generic over
@@ -456,7 +456,7 @@ fn runSequence(comptime Source: type, src: *Source, gpa: std.mem.Allocator) !voi
             .touch_stale => if (stale.items.len == 0) {
                 op = .insert;
             },
-            .insert, .clear => {},
+            .insert, .clear, .reserve => {},
         }
 
         switch (op) {
@@ -503,6 +503,11 @@ fn runSequence(comptime Source: type, src: *Source, gpa: std.mem.Allocator) !voi
                 live.clearRetainingCapacity();
                 map.clearRetainingCapacity();
             },
+            .reserve => {
+                // Capacity-only: the oracle is unchanged. Reserve a small amount so
+                // setCapacity is exercised at non-doubling sizes under arbitrary state.
+                try map.ensureUnusedCapacity(src.value() % 16);
+            },
         }
 
         // Invariants after every op.
@@ -537,11 +542,12 @@ const PrngSource = struct {
         return false;
     }
     fn nextOp(self: *PrngSource) Op {
-        // Draw `clear` rarely (~1/20) so sequences build up state between clears;
-        // otherwise pick uniformly among the non-clear ops.
+        // Draw `clear` and `reserve` rarely so sequences build up state between them;
+        // otherwise pick uniformly among the core ops.
         if (self.random.uintLessThan(u32, 20) == 0) return .clear;
-        const non_clear = [_]Op{ .insert, .remove_live, .get_live, .getptr_mutate_live, .touch_stale };
-        return non_clear[self.random.uintLessThan(usize, non_clear.len)];
+        if (self.random.uintLessThan(u32, 15) == 0) return .reserve;
+        const core = [_]Op{ .insert, .remove_live, .get_live, .getptr_mutate_live, .touch_stale };
+        return core[self.random.uintLessThan(usize, core.len)];
     }
     fn value(self: *PrngSource) u32 {
         return self.random.int(u32);
