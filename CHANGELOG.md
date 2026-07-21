@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-21
+
 ### Added
 
 - `valueIterator()` and `keyIterator()` on `SlotMap(T)`, mirroring `std.AutoHashMap`.
@@ -39,6 +41,7 @@ Initial release.
 - `iterator()` over live entries yielding `{ key, value_ptr }`.
 - `examples/basic.zig` demonstrating entity-store usage.
 
-[Unreleased]: https://github.com/itsakeyfut/slotmap/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/itsakeyfut/slotmap/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/itsakeyfut/slotmap/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/itsakeyfut/slotmap/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/itsakeyfut/slotmap/releases/tag/v0.1.0
