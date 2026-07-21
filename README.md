@@ -135,6 +135,8 @@ zig build examples
 | `remove` | `(*Self, Key) ?T` | Remove and return the value, or `null` if the key is stale. Bumps the slot's generation. |
 | `count` | `(Self) usize` | Number of live values. |
 | `iterator` | `(*Self) Iterator` | Iterate live entries as `{ key, value_ptr }`, in slot order. |
+| `valueIterator` | `(*Self) ValueIterator` | Iterate live values as `*T`, in slot order. |
+| `keyIterator` | `(*const Self) KeyIterator` | Iterate live keys (by value), in slot order. Works on a `const` map. |
 
 `Key` is `struct { index: u32, generation: u32 }` — cheap to copy and store.
 
@@ -142,6 +144,10 @@ A `get`/`getPtr`/`remove`/`contains` call returns `null`/`false` when the key do
 match a live slot: either the value was removed, or the slot has since been reused by a
 newer generation. This is the core guarantee — a stale handle can never read or mutate
 an unrelated value.
+
+`valueIterator` hands out `*T` pointers with the same lifetime caveat as `getPtr` — an
+intervening `insert` that grows the map invalidates them. `keyIterator` yields `Key` by
+value, so it has no such caveat and can iterate a `const` map.
 
 ## Design
 

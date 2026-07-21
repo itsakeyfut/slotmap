@@ -17,7 +17,13 @@ cost, and what should trigger doing it?*
    depended on for a long time.
 2. **Add features on demand, not on speculation.** New capability is added when
    LegendEngine (or another concrete user) demonstrably needs it — not because
-   another ecosystem's slot map has it.
+   another ecosystem's slot map has it. *Narrow exception:* completing a small,
+   idiomatic, near-zero-cost **symmetric** API set that mirrors an already-present
+   pattern (e.g. the `iterator` / `keyIterator` / `valueIterator` triad that mirrors
+   `std`) is allowed without a separate concrete user for each member, because the
+   symmetry itself reduces surprise and the added surface and risk are negligible.
+   The bar is high: the addition must be trivial, read-only or otherwise safe, and
+   complete an existing pattern — never introduce a new capability.
 3. **Prefer Zig-native solutions.** Where another language's slot map reaches for a
    particular API, ask whether Zig's `comptime`, optionals, or allocators offer a
    better-fitting answer before copying the shape.
@@ -45,8 +51,10 @@ are recycled through an intrusive free list (`free_head` + `next_free`).
 - **Chosen benefit:** one allocation, O(1) insert / get / remove, and a value's
   address does not change just because *other* entries are removed.
 - **Accepted cost:** iteration walks the holes. As the map fragments, `iterator`
-  touches unoccupied slots and cache locality degrades. This is a conscious trade —
-  see *Dense storage* under considered alternatives.
+  touches unoccupied slots and cache locality degrades. The `valueIterator` and
+  `keyIterator` variants are ergonomic projections over the same walk, not a
+  densification, so they inherit this cost. This is a conscious trade — see
+  *Dense storage* under considered alternatives.
 
 ### Generational keys (`index: u32`, `generation: u32`)
 
@@ -88,7 +96,9 @@ p.* = 5;                     // ⚠️ use-after-free if a grow happened
 Within a run of reads with no intervening insert, pointers are stable. **This is a
 deliberate, documented limitation, not a bug.** Callers should re-fetch via `getPtr`
 after any insert. If a real need for pointers that survive inserts appears, that is a
-backing-store decision (see *Segmented storage*), not a small patch.
+backing-store decision (see *Segmented storage*), not a small patch. `valueIterator`
+shares this hazard (it hands out `*T`); `keyIterator` does not — it yields `Key` by
+value, so it is safe across inserts and can iterate a `const` map.
 
 ### Error and allocation surface
 
@@ -124,7 +134,6 @@ condition is the point: it distinguishes "not built yet, on purpose" from "missi
 | `initCapacity` / `reserve` | Pre-allocate slots up front | Per-frame allocation churn from incremental `grow()` shows up in profiles. |
 | `clear` | Empty the map, invalidating all outstanding keys | A reset/level-transition use case appears. **See the trap below.** |
 | `realloc`-based growth | Grow in place when the allocator can, avoiding the copy | `grow()`'s copy cost appears in profiles. Switch `alloc` + `@memcpy` + `free` to `allocator.realloc`. |
-| Iteration variants | Values-only / keys-only iterators | Call sites want the ergonomics. |
 
 **The `clear` trap.** A correct `clear` **must bump the generation of every occupied
 slot** (or reset the whole array to fresh generations). The cheap version — setting
