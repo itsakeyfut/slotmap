@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `valueIterator()` and `keyIterator()` on `SlotMap(T)`, mirroring `std.AutoHashMap`.
   `valueIterator` yields `*T`; `keyIterator` yields `Key` by value and can iterate a
   `const` map.
+- `clearRetainingCapacity()` on `SlotMap(T)`: remove all entries and invalidate every
+  outstanding key while keeping the allocated capacity.
 
 ## [0.1.1] - 2026-07-21
 
