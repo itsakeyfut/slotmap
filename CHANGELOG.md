@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `valueIterator()` and `keyIterator()` on `SlotMap(T)`, mirroring `std.AutoHashMap`.
+  `valueIterator` yields `*T`; `keyIterator` yields `Key` by value and can iterate a
+  `const` map.
+
 ## [0.1.1] - 2026-07-21
 
 ### Changed
