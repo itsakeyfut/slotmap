@@ -44,7 +44,7 @@ that are frequently created and destroyed while other things hold references to 
 Fetch the package (pins to a tagged release):
 
 ```sh
-zig fetch --save "git+https://github.com/itsakeyfut/slotmap#v0.1.0"
+zig fetch --save "git+https://github.com/itsakeyfut/slotmap#v0.1.1"
 ```
 
 Then wire the module into your `build.zig`:
