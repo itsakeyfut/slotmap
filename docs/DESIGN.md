@@ -130,7 +130,9 @@ condition is the point: it distinguishes "not built yet, on purpose" from "missi
 slot** (or reset the whole array to fresh generations). The cheap version — setting
 `next_fresh = 0` and `free_head = nil` — reuses slots without changing their
 generations, so keys issued before the clear would silently match values inserted
-after it. That breaks the core invariant. Do not ship the cheap version.
+after it. That breaks the core invariant. Do not ship the cheap version. Any such
+bump must also apply `remove`'s skip-`0` reservation, or a cleared slot could go
+live at generation `0` and reintroduce the aliasing the reservation eliminates.
 
 ## Explicit non-goals
 
