@@ -81,17 +81,29 @@ pub fn SlotMap(comptime T: type) type {
             return &self.slots[key.index].value;
         }
 
-        pub fn remove(self: *Self, key: Key) ?T {
-            if (!self.contains(key)) return null;
-            const slot = &self.slots[key.index];
-            const value = slot.value;
+        fn freeSlot(self: *Self, i: u32) void {
+            const slot = &self.slots[i];
             slot.occupied = false;
             slot.generation +%= 1;
             if (slot.generation == 0) slot.generation = 1; // reserve generation 0
             slot.next_free = self.free_head;
-            self.free_head = key.index;
+            self.free_head = i;
+        }
+
+        pub fn remove(self: *Self, key: Key) ?T {
+            if (!self.contains(key)) return null;
+            const value = self.slots[key.index].value;
+            self.freeSlot(key.index);
             self.live -= 1;
             return value;
+        }
+
+        pub fn clearRetainingCapacity(self: *Self) void {
+            var i: u32 = 0;
+            while (i < self.next_fresh) : (i += 1) {
+                if (self.slots[i].occupied) self.freeSlot(i);
+            }
+            self.live = 0;
         }
 
         pub fn count(self: Self) usize {
@@ -400,7 +412,7 @@ test "safe pattern: re-fetch getPtr after an insert that grows" {
 
 const OracleEntry = struct { key: SlotMap(u32).Key, val: u32 };
 
-const Op = enum { insert, remove_live, get_live, getptr_mutate_live, touch_stale };
+const Op = enum { insert, remove_live, get_live, getptr_mutate_live, touch_stale, clear };
 
 // Drives a random sequence of operations against SlotMap(u32) and checks it
 // against a black-box oracle (a live-key model + a stale-key list). Generic over
@@ -426,7 +438,7 @@ fn runSequence(comptime Source: type, src: *Source, gpa: std.mem.Allocator) !voi
             .touch_stale => if (stale.items.len == 0) {
                 op = .insert;
             },
-            .insert => {},
+            .insert, .clear => {},
         }
 
         switch (op) {
@@ -467,6 +479,12 @@ fn runSequence(comptime Source: type, src: *Source, gpa: std.mem.Allocator) !voi
                 try testing.expect(!map.contains(k));
                 try testing.expect(map.remove(k) == null);
             },
+            .clear => {
+                // Every live key becomes stale; the model and the map both empty.
+                for (live.items) |e| try stale.append(gpa, e.key);
+                live.clearRetainingCapacity();
+                map.clearRetainingCapacity();
+            },
         }
 
         // Invariants after every op.
@@ -501,7 +519,11 @@ const PrngSource = struct {
         return false;
     }
     fn nextOp(self: *PrngSource) Op {
-        return self.random.enumValueWithIndex(Op, usize);
+        // Draw `clear` rarely (~1/20) so sequences build up state between clears;
+        // otherwise pick uniformly among the non-clear ops.
+        if (self.random.uintLessThan(u32, 20) == 0) return .clear;
+        const non_clear = [_]Op{ .insert, .remove_live, .get_live, .getptr_mutate_live, .touch_stale };
+        return non_clear[self.random.uintLessThan(usize, non_clear.len)];
     }
     fn value(self: *PrngSource) u32 {
         return self.random.int(u32);
@@ -632,4 +654,76 @@ test "keyIterator works on a const map" {
     var it = cm.keyIterator();
     while (it.next()) |_| n += 1;
     try testing.expectEqual(@as(usize, 2), n);
+}
+
+test "clearRetainingCapacity invalidates the pre-clear key on slot reuse" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    const k = try m.insert(10);
+    try testing.expect(m.contains(k));
+
+    m.clearRetainingCapacity();
+    try testing.expectEqual(@as(usize, 0), m.count());
+    try testing.expect(m.get(k) == null);
+    try testing.expect(m.getPtr(k) == null);
+    try testing.expect(!m.contains(k));
+    try testing.expect(m.remove(k) == null);
+
+    // Reuse the same slot; the old key stays rejected, the new one works.
+    const k2 = try m.insert(20);
+    try testing.expectEqual(k.index, k2.index);
+    try testing.expect(k.generation != k2.generation);
+    try testing.expect(m.get(k) == null);
+    try testing.expectEqual(@as(?u32, 20), m.get(k2));
+}
+
+test "clearRetainingCapacity empties a multi-element map and invalidates all keys" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    var keys: [5]@TypeOf(m).Key = undefined;
+    for (0..5) |i| keys[i] = try m.insert(@intCast(i));
+    try testing.expectEqual(@as(usize, 5), m.count());
+
+    m.clearRetainingCapacity();
+    try testing.expectEqual(@as(usize, 0), m.count());
+    for (keys) |k| try testing.expect(!m.contains(k));
+
+    var vit = m.valueIterator();
+    try testing.expect(vit.next() == null);
+    var kit = m.keyIterator();
+    try testing.expect(kit.next() == null);
+    var eit = m.iterator();
+    try testing.expect(eit.next() == null);
+}
+
+test "clearRetainingCapacity on an empty map is a no-op" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+    m.clearRetainingCapacity();
+    try testing.expectEqual(@as(usize, 0), m.count());
+    const k = try m.insert(1);
+    try testing.expectEqual(@as(?u32, 1), m.get(k));
+}
+
+test "clearRetainingCapacity keeps the allocated capacity" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    // Insert enough to force growth, so there is real capacity to retain.
+    for (0..20) |i| _ = try m.insert(@intCast(i));
+    const ptr_before = m.slots.ptr;
+    const len_before = m.slots.len;
+    const next_fresh_before = m.next_fresh;
+
+    m.clearRetainingCapacity();
+    try testing.expectEqual(@as(usize, 0), m.count());
+    try testing.expectEqual(ptr_before, m.slots.ptr);
+    try testing.expectEqual(len_before, m.slots.len);
+    try testing.expectEqual(next_fresh_before, m.next_fresh);
+
+    // Re-inserting up to the retained capacity does not reallocate.
+    for (0..len_before) |_| _ = try m.insert(0);
+    try testing.expectEqual(ptr_before, m.slots.ptr);
 }

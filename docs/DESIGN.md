@@ -132,16 +132,17 @@ condition is the point: it distinguishes "not built yet, on purpose" from "missi
 | Feature | What it does | When to add it |
 | --- | --- | --- |
 | `initCapacity` / `reserve` | Pre-allocate slots up front | Per-frame allocation churn from incremental `grow()` shows up in profiles. |
-| `clear` | Empty the map, invalidating all outstanding keys | A reset/level-transition use case appears. **See the trap below.** |
 | `realloc`-based growth | Grow in place when the allocator can, avoiding the copy | `grow()`'s copy cost appears in profiles. Switch `alloc` + `@memcpy` + `free` to `allocator.realloc`. |
 
-**The `clear` trap.** A correct `clear` **must bump the generation of every occupied
-slot** (or reset the whole array to fresh generations). The cheap version — setting
-`next_fresh = 0` and `free_head = nil` — reuses slots without changing their
-generations, so keys issued before the clear would silently match values inserted
-after it. That breaks the core invariant. Do not ship the cheap version. Any such
-bump must also apply `remove`'s skip-`0` reservation, or a cleared slot could go
-live at generation `0` and reintroduce the aliasing the reservation eliminates.
+**On `clear`.** `clearRetainingCapacity` empties the map by bumping the generation of
+every occupied slot (through the shared `freeSlot` helper, which also applies the
+skip-`0` reservation) and resetting `live`; it **retains** the backing allocation.
+There is deliberately **no `clearAndFree`**: freeing the slot array discards the
+generation counters, so a later refill would reissue `Key{ 0, 1 }` and collide with a
+pre-clear key, breaking the core invariant. Reclaiming memory is therefore `deinit` +
+`init` (a clean "the map is gone" boundary), not a `clear` variant. The cheap reset —
+`next_fresh = 0` / `free_head = nil` without bumping generations — is likewise unsound
+(pre-clear keys would match post-clear values) and must never ship.
 
 ## Explicit non-goals
 
