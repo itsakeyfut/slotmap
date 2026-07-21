@@ -138,6 +138,9 @@ zig build examples
 | `valueIterator` | `(*Self) ValueIterator` | Iterate live values as `*T`, in slot order. |
 | `keyIterator` | `(*const Self) KeyIterator` | Iterate live keys (by value), in slot order. Works on a `const` map. |
 | `clearRetainingCapacity` | `(*Self) void` | Remove all entries, invalidating every outstanding key; keeps the allocated capacity. |
+| `ensureTotalCapacity` | `(*Self, usize) !void` | Grow so total capacity is at least N slots. |
+| `ensureUnusedCapacity` | `(*Self, usize) !void` | Grow so N more entries can be inserted without a reallocation. |
+| `initCapacity` | `(allocator, usize) !Self` | Create an empty map pre-sized for N slots. |
 
 `Key` is `struct { index: u32, generation: u32 }` — cheap to copy and store.
 

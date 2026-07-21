@@ -100,6 +100,11 @@ backing-store decision (see *Segmented storage*), not a small patch. `valueItera
 shares this hazard (it hands out `*T`); `keyIterator` does not — it yields `Key` by
 value, so it is safe across inserts and can iterate a `const` map.
 
+Pre-sizing avoids the hazard for a known batch: a map absorbs `capacity - count`
+inserts before it grows, so `ensureTotalCapacity`/`ensureUnusedCapacity` (the latter
+reserves `count + N`) let a caller guarantee a batch of inserts triggers no `grow()`,
+keeping held `getPtr`/iterator pointers valid across that batch.
+
 ### Error and allocation surface
 
 Only `init` and `insert` allocate, so only they return `!`. `get` / `getPtr` /
@@ -131,7 +136,6 @@ condition is the point: it distinguishes "not built yet, on purpose" from "missi
 
 | Feature | What it does | When to add it |
 | --- | --- | --- |
-| `initCapacity` / `reserve` | Pre-allocate slots up front | Per-frame allocation churn from incremental `grow()` shows up in profiles. |
 | `realloc`-based growth | Grow in place when the allocator can, avoiding the copy | `grow()`'s copy cost appears in profiles. Switch `alloc` + `@memcpy` + `free` to `allocator.realloc`. |
 
 **On `clear`.** `clearRetainingCapacity` empties the map by bumping the generation of
