@@ -412,7 +412,7 @@ test "safe pattern: re-fetch getPtr after an insert that grows" {
 
 const OracleEntry = struct { key: SlotMap(u32).Key, val: u32 };
 
-const Op = enum { insert, remove_live, get_live, getptr_mutate_live, touch_stale };
+const Op = enum { insert, remove_live, get_live, getptr_mutate_live, touch_stale, clear };
 
 // Drives a random sequence of operations against SlotMap(u32) and checks it
 // against a black-box oracle (a live-key model + a stale-key list). Generic over
@@ -438,7 +438,7 @@ fn runSequence(comptime Source: type, src: *Source, gpa: std.mem.Allocator) !voi
             .touch_stale => if (stale.items.len == 0) {
                 op = .insert;
             },
-            .insert => {},
+            .insert, .clear => {},
         }
 
         switch (op) {
@@ -479,6 +479,12 @@ fn runSequence(comptime Source: type, src: *Source, gpa: std.mem.Allocator) !voi
                 try testing.expect(!map.contains(k));
                 try testing.expect(map.remove(k) == null);
             },
+            .clear => {
+                // Every live key becomes stale; the model and the map both empty.
+                for (live.items) |e| try stale.append(gpa, e.key);
+                live.clearRetainingCapacity();
+                map.clearRetainingCapacity();
+            },
         }
 
         // Invariants after every op.
@@ -513,7 +519,11 @@ const PrngSource = struct {
         return false;
     }
     fn nextOp(self: *PrngSource) Op {
-        return self.random.enumValueWithIndex(Op, usize);
+        // Draw `clear` rarely (~1/20) so sequences build up state between clears;
+        // otherwise pick uniformly among the non-clear ops.
+        if (self.random.uintLessThan(u32, 20) == 0) return .clear;
+        const non_clear = [_]Op{ .insert, .remove_live, .get_live, .getptr_mutate_live, .touch_stale };
+        return non_clear[self.random.uintLessThan(usize, non_clear.len)];
     }
     fn value(self: *PrngSource) u32 {
         return self.random.int(u32);
