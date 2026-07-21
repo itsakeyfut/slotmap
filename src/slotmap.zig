@@ -195,3 +195,292 @@ test "iterator visits only live entries" {
     _ = a;
     _ = c;
 }
+
+test "double remove returns null and does not double-decrement count" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    const a = try m.insert(10);
+    const b = try m.insert(20);
+    try testing.expectEqual(@as(usize, 2), m.count());
+
+    try testing.expectEqual(@as(?u32, 10), m.remove(a));
+    try testing.expectEqual(@as(usize, 1), m.count());
+
+    // Second remove of the same (now stale) key is a no-op.
+    try testing.expect(m.remove(a) == null);
+    try testing.expectEqual(@as(usize, 1), m.count());
+
+    // b is unaffected.
+    try testing.expectEqual(@as(?u32, 20), m.get(b));
+}
+
+test "stale key is rejected by every accessor, including after slot reuse" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    const k = try m.insert(10);
+    _ = m.remove(k);
+
+    // Directly after removal: all accessors reject the stale key.
+    try testing.expect(m.get(k) == null);
+    try testing.expect(m.getPtr(k) == null);
+    try testing.expect(!m.contains(k));
+    try testing.expect(m.remove(k) == null);
+
+    // Reuse the slot with a new generation, then re-check the old key.
+    const k2 = try m.insert(20);
+    try testing.expectEqual(k.index, k2.index);
+    try testing.expect(k.generation != k2.generation);
+    try testing.expect(m.get(k) == null);
+    try testing.expect(m.getPtr(k) == null);
+    try testing.expect(!m.contains(k));
+    try testing.expect(m.remove(k) == null);
+    // The new key still works.
+    try testing.expectEqual(@as(?u32, 20), m.get(k2));
+}
+
+test "iterator reflects removals and empties fully" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    const a = try m.insert(1);
+    const b = try m.insert(2);
+    const c = try m.insert(3);
+    const d = try m.insert(4);
+    _ = m.remove(b);
+    _ = m.remove(d);
+
+    // Only live entries (a=1, c=3) are visited, with correct values.
+    var sum: u32 = 0;
+    var n: usize = 0;
+    var it = m.iterator();
+    while (it.next()) |e| {
+        try testing.expect(m.contains(e.key));
+        sum += e.value_ptr.*;
+        n += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), n);
+    try testing.expectEqual(m.count(), n);
+    try testing.expectEqual(@as(u32, 4), sum); // 1 + 3
+    _ = a;
+    _ = c;
+
+    // After removing everything, the iterator yields nothing immediately.
+    var drain_it = m.iterator();
+    while (drain_it.next()) |e| _ = m.remove(e.key);
+    try testing.expectEqual(@as(usize, 0), m.count());
+    var it2 = m.iterator();
+    try testing.expect(it2.next() == null);
+}
+
+test "generation wraps from maxInt to 0 and still rejects the stale key" {
+    // White-box: forcing a real 2^32-cycle wrap is infeasible, so we set the
+    // slot's generation to maxInt directly and exercise the wrap boundary.
+    // This documents the CURRENT behavior (wrap -> 0) and the immediate-reuse
+    // safety. The astronomically-rare true ABA collision (a key from 2^32
+    // reuse cycles ago) cannot be reproduced in bounded time and is out of scope.
+    const Key = SlotMap(u32).Key;
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    const k = try m.insert(10);
+    m.slots[k.index].generation = std.math.maxInt(u32);
+    const kmax = Key{ .index = k.index, .generation = std.math.maxInt(u32) };
+    try testing.expect(m.contains(kmax));
+
+    _ = m.remove(kmax); // generation: maxInt +% 1 == 0
+    try testing.expectEqual(@as(u32, 0), m.slots[kmax.index].generation);
+    try testing.expect(!m.contains(kmax));
+
+    const k2 = try m.insert(20); // reuses the slot; generation is now 0
+    try testing.expectEqual(@as(u32, 0), k2.generation);
+    try testing.expect(m.contains(k2));
+    try testing.expect(m.get(kmax) == null); // old maxInt key rejected vs gen 0
+    try testing.expectEqual(@as(?u32, 20), m.get(k2));
+}
+
+test "insert failure during grow is atomic: state survives and recovers" {
+    var fa = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    var m = try SlotMap(u32).init(fa.allocator());
+    defer m.deinit();
+
+    const Key = SlotMap(u32).Key;
+    var keys: [8]Key = undefined;
+    // Inserts 1..8 succeed (grow 0->8 is the single allowed allocation).
+    for (0..8) |i| keys[i] = try m.insert(@intCast(i));
+    try testing.expectEqual(@as(usize, 8), m.count());
+
+    // Insert 9 forces grow 8->16, which the failing allocator rejects.
+    try testing.expectError(error.OutOfMemory, m.insert(99));
+
+    // Core invariant: failure did not corrupt state.
+    try testing.expectEqual(@as(usize, 8), m.count());
+    for (0..8) |i| try testing.expectEqual(@as(?u32, @intCast(i)), m.get(keys[i]));
+
+    // Recovery (white-box): swap to a healthy allocator; further inserts work.
+    // (FailingAllocator is sticky, so the same instance cannot recover.)
+    m.allocator = testing.allocator;
+    const k9 = try m.insert(99);
+    try testing.expectEqual(@as(usize, 9), m.count());
+    try testing.expectEqual(@as(?u32, 99), m.get(k9));
+}
+
+test "grow relocates the backing array (pointer-invalidation hazard is real)" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    _ = try m.insert(0); // triggers first grow 0->8
+    // Fill to the growth boundary so the next insert reallocates.
+    while (m.next_fresh < m.slots.len) _ = try m.insert(1);
+    const before = m.slots.ptr;
+    _ = try m.insert(2); // grows 8->16, relocating the array
+    try testing.expect(m.slots.ptr != before);
+}
+
+test "safe pattern: re-fetch getPtr after an insert that grows" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    const k = try m.insert(100);
+    // Read via getPtr (valid now).
+    try testing.expectEqual(@as(u32, 100), m.getPtr(k).?.*);
+
+    // Fill to the growth boundary, then insert to force a reallocation.
+    while (m.next_fresh < m.slots.len) _ = try m.insert(0);
+    _ = try m.insert(0); // reallocates the backing array
+
+    // The recommended pattern: re-fetch after the insert, then it is correct.
+    const p = m.getPtr(k) orelse return error.TestExpectedNonNull;
+    try testing.expectEqual(@as(u32, 100), p.*);
+    p.* = 101;
+    try testing.expectEqual(@as(?u32, 101), m.get(k));
+}
+
+const OracleEntry = struct { key: SlotMap(u32).Key, val: u32 };
+
+const Op = enum { insert, remove_live, get_live, getptr_mutate_live, touch_stale };
+
+// Drives a random sequence of operations against SlotMap(u32) and checks it
+// against a black-box oracle (a live-key model + a stale-key list). Generic over
+// `Source` (see `PrngSource`) so an alternative op source — e.g. a coverage-guided
+// fuzzer — can drive the same checks without duplicating them.
+fn runSequence(comptime Source: type, src: *Source, gpa: std.mem.Allocator) !void {
+    var map = try SlotMap(u32).init(gpa);
+    defer map.deinit();
+
+    var live: std.ArrayList(OracleEntry) = .empty;
+    defer live.deinit(gpa);
+    var stale: std.ArrayList(SlotMap(u32).Key) = .empty;
+    defer stale.deinit(gpa);
+
+    while (!src.done()) {
+        var op = src.nextOp();
+        // Empty-collection guard: remap ops with an empty target to `insert`,
+        // else index(0) would panic (and read as a false fuzzer crash).
+        switch (op) {
+            .remove_live, .get_live, .getptr_mutate_live => if (live.items.len == 0) {
+                op = .insert;
+            },
+            .touch_stale => if (stale.items.len == 0) {
+                op = .insert;
+            },
+            .insert => {},
+        }
+
+        switch (op) {
+            .insert => {
+                const v = src.value();
+                const k = try map.insert(v);
+                try testing.expectEqual(@as(?u32, v), map.get(k));
+                try testing.expect(map.contains(k));
+                try live.append(gpa, .{ .key = k, .val = v });
+            },
+            .remove_live => {
+                const i = src.index(live.items.len);
+                const e = live.items[i];
+                try testing.expectEqual(@as(?u32, e.val), map.remove(e.key));
+                _ = live.swapRemove(i);
+                try stale.append(gpa, e.key);
+            },
+            .get_live => {
+                const i = src.index(live.items.len);
+                const e = live.items[i];
+                try testing.expectEqual(@as(?u32, e.val), map.get(e.key));
+                try testing.expect(map.contains(e.key));
+                const p = map.getPtr(e.key) orelse return error.TestExpectedNonNull;
+                try testing.expectEqual(e.val, p.*);
+            },
+            .getptr_mutate_live => {
+                const i = src.index(live.items.len);
+                const nv = src.value();
+                const p = map.getPtr(live.items[i].key) orelse return error.TestExpectedNonNull;
+                p.* = nv;
+                live.items[i].val = nv;
+            },
+            .touch_stale => {
+                const i = src.index(stale.items.len);
+                const k = stale.items[i];
+                try testing.expect(map.get(k) == null);
+                try testing.expect(map.getPtr(k) == null);
+                try testing.expect(!map.contains(k));
+                try testing.expect(map.remove(k) == null);
+            },
+        }
+
+        // Invariants after every op.
+        try testing.expectEqual(live.items.len, map.count());
+        for (live.items) |e| {
+            try testing.expectEqual(@as(?u32, e.val), map.get(e.key));
+            try testing.expect(map.contains(e.key));
+        }
+        // The iterator yields exactly the live set (compare as a set on index).
+        var seen = std.AutoHashMap(u32, u32).init(gpa);
+        defer seen.deinit();
+        var it = map.iterator();
+        var n: usize = 0;
+        while (it.next()) |entry| {
+            try seen.put(entry.key.index, entry.value_ptr.*);
+            n += 1;
+        }
+        try testing.expectEqual(live.items.len, n);
+        for (live.items) |e| {
+            try testing.expectEqual(@as(?u32, e.val), seen.get(e.key.index));
+        }
+    }
+}
+
+const PrngSource = struct {
+    random: std.Random,
+    remaining: usize,
+
+    fn done(self: *PrngSource) bool {
+        if (self.remaining == 0) return true;
+        self.remaining -= 1;
+        return false;
+    }
+    fn nextOp(self: *PrngSource) Op {
+        return self.random.enumValueWithIndex(Op, usize);
+    }
+    fn value(self: *PrngSource) u32 {
+        return self.random.int(u32);
+    }
+    fn index(self: *PrngSource, len: usize) usize {
+        return self.random.uintLessThan(usize, len);
+    }
+};
+
+// This seeded PRNG source is the only op source we ship. `runSequence` was made
+// generic to also accept a `std.testing.Smith` fuzz source, but coverage-guided
+// fuzzing is unavailable on the pinned Zig 0.16.0: its `compiler/test_runner.zig`
+// fails to compile in `-ffuzz` mode (passes a `*builtin.StackTrace` where
+// `*const debug.StackTrace` is required). Re-add a Smith driver + a Linux CI
+// `--fuzz` step once the toolchain compiles fuzz tests.
+test "property: random op sequences match the oracle" {
+    const seeds = [_]u64{ 0x1234, 0xdeadbeef, 0xcafef00d, 1, 42, 99_999 };
+    for (seeds) |seed| {
+        var prng = std.Random.DefaultPrng.init(seed);
+        var src = PrngSource{ .random = prng.random(), .remaining = 500 };
+        try runSequence(PrngSource, &src, testing.allocator);
+    }
+}
