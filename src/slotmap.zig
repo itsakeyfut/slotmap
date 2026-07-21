@@ -123,6 +123,35 @@ pub fn SlotMap(comptime T: type) type {
         pub fn iterator(self: *Self) Iterator {
             return .{ .map = self, .index = 0 };
         }
+
+        pub const ValueIterator = struct {
+            inner: Iterator,
+            pub fn next(self: *ValueIterator) ?*T {
+                return if (self.inner.next()) |e| e.value_ptr else null;
+            }
+        };
+
+        pub fn valueIterator(self: *Self) ValueIterator {
+            return .{ .inner = self.iterator() };
+        }
+
+        pub const KeyIterator = struct {
+            map: *const Self,
+            index: u32,
+            pub fn next(self: *KeyIterator) ?Key {
+                while (self.index < self.map.next_fresh) {
+                    const i = self.index;
+                    self.index += 1;
+                    const slot = &self.map.slots[i];
+                    if (slot.occupied) return .{ .index = i, .generation = slot.generation };
+                }
+                return null;
+            }
+        };
+
+        pub fn keyIterator(self: *const Self) KeyIterator {
+            return .{ .map = self, .index = 0 };
+        }
     };
 }
 
@@ -495,4 +524,112 @@ test "property: random op sequences match the oracle" {
         var src = PrngSource{ .random = prng.random(), .remaining = 500 };
         try runSequence(PrngSource, &src, testing.allocator);
     }
+}
+
+test "valueIterator visits live values and allows mutation" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    _ = try m.insert(1);
+    const b = try m.insert(2);
+    _ = try m.insert(3);
+    _ = m.remove(b);
+
+    var sum: u32 = 0;
+    var n: usize = 0;
+    var it = m.valueIterator();
+    while (it.next()) |p| {
+        sum += p.*;
+        p.* += 10; // mutate through the pointer
+        n += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), n);
+    try testing.expectEqual(m.count(), n);
+    try testing.expectEqual(@as(u32, 4), sum); // 1 + 3
+
+    // Mutations landed.
+    var sum2: u32 = 0;
+    var it2 = m.valueIterator();
+    while (it2.next()) |p| sum2 += p.*;
+    try testing.expectEqual(@as(u32, 24), sum2); // 11 + 13
+}
+
+test "keyIterator visits live keys" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    _ = try m.insert(10);
+    const b = try m.insert(20);
+    _ = try m.insert(30);
+    _ = m.remove(b);
+
+    var n: usize = 0;
+    var it = m.keyIterator();
+    while (it.next()) |k| {
+        try testing.expect(m.contains(k));
+        n += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), n);
+    try testing.expectEqual(m.count(), n);
+}
+
+test "value/key iterators are empty on an empty and a fully-cleared map" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    var v0 = m.valueIterator();
+    try testing.expect(v0.next() == null);
+    var k0 = m.keyIterator();
+    try testing.expect(k0.next() == null);
+
+    const a = try m.insert(1);
+    const b = try m.insert(2);
+    _ = m.remove(a);
+    _ = m.remove(b);
+    try testing.expectEqual(@as(usize, 0), m.count());
+
+    var v1 = m.valueIterator();
+    try testing.expect(v1.next() == null);
+    var k1 = m.keyIterator();
+    try testing.expect(k1.next() == null);
+}
+
+test "keyIterator agrees with iterator() across removals" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+
+    var keys: [6]@TypeOf(m).Key = undefined;
+    for (0..6) |i| keys[i] = try m.insert(@intCast(i));
+    _ = m.remove(keys[1]);
+    _ = m.remove(keys[4]);
+
+    // Collect keys from each independent walk, indexed by slot index.
+    var from_key = std.AutoHashMap(u32, u32).init(testing.allocator);
+    defer from_key.deinit();
+    var kit = m.keyIterator();
+    while (kit.next()) |k| try from_key.put(k.index, k.generation);
+
+    var from_entry = std.AutoHashMap(u32, u32).init(testing.allocator);
+    defer from_entry.deinit();
+    var eit = m.iterator();
+    while (eit.next()) |e| try from_entry.put(e.key.index, e.key.generation);
+
+    try testing.expectEqual(from_entry.count(), from_key.count());
+    var iter = from_entry.iterator();
+    while (iter.next()) |kv| {
+        try testing.expectEqual(kv.value_ptr.*, from_key.get(kv.key_ptr.*).?);
+    }
+}
+
+test "keyIterator works on a const map" {
+    var m = try SlotMap(u32).init(testing.allocator);
+    defer m.deinit();
+    _ = try m.insert(1);
+    _ = try m.insert(2);
+
+    const cm: *const @TypeOf(m) = &m;
+    var n: usize = 0;
+    var it = cm.keyIterator();
+    while (it.next()) |_| n += 1;
+    try testing.expectEqual(@as(usize, 2), n);
 }
