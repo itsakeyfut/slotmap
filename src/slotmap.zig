@@ -363,7 +363,8 @@ const Op = enum { insert, remove_live, get_live, getptr_mutate_live, touch_stale
 
 // Drives a random sequence of operations against SlotMap(u32) and checks it
 // against a black-box oracle (a live-key model + a stale-key list). Generic over
-// `Source` so the same logic runs from a seeded PRNG and from std.testing.Smith.
+// `Source` (see `PrngSource`) so an alternative op source — e.g. a coverage-guided
+// fuzzer — can drive the same checks without duplicating them.
 fn runSequence(comptime Source: type, src: *Source, gpa: std.mem.Allocator) !void {
     var map = try SlotMap(u32).init(gpa);
     defer map.deinit();
@@ -469,6 +470,12 @@ const PrngSource = struct {
     }
 };
 
+// This seeded PRNG source is the only op source we ship. `runSequence` was made
+// generic to also accept a `std.testing.Smith` fuzz source, but coverage-guided
+// fuzzing is unavailable on the pinned Zig 0.16.0: its `compiler/test_runner.zig`
+// fails to compile in `-ffuzz` mode (passes a `*builtin.StackTrace` where
+// `*const debug.StackTrace` is required). Re-add a Smith driver + a Linux CI
+// `--fuzz` step once the toolchain compiles fuzz tests.
 test "property: random op sequences match the oracle" {
     const seeds = [_]u64{ 0x1234, 0xdeadbeef, 0xcafef00d, 1, 42, 99_999 };
     for (seeds) |seed| {
@@ -476,34 +483,4 @@ test "property: random op sequences match the oracle" {
         var src = PrngSource{ .random = prng.random(), .remaining = 500 };
         try runSequence(PrngSource, &src, testing.allocator);
     }
-}
-
-const SmithSource = struct {
-    smith: *std.testing.Smith,
-
-    fn done(self: *SmithSource) bool {
-        // Weighted so most draws continue (~15:1) — longer sequences.
-        return self.smith.eosWeightedSimple(15, 1);
-    }
-    fn nextOp(self: *SmithSource) Op {
-        return self.smith.value(Op);
-    }
-    fn value(self: *SmithSource) u32 {
-        return self.smith.value(u32);
-    }
-    fn index(self: *SmithSource, len: usize) usize {
-        return self.smith.index(len);
-    }
-};
-
-fn fuzzOne(_: void, smith: *std.testing.Smith) anyerror!void {
-    var src = SmithSource{ .smith = smith };
-    try runSequence(SmithSource, &src, testing.allocator);
-}
-
-test "fuzz: random op sequences match the oracle" {
-    // Under plain `zig build test` this replays only the empty smoke input
-    // (0 ops) on all platforms. Real coverage-guided fuzzing runs on Linux via
-    // `zig build test --fuzz=<N>` (see CI). The library stays cross-platform.
-    try std.testing.fuzz({}, fuzzOne, .{});
 }
