@@ -356,3 +356,124 @@ test "safe pattern: re-fetch getPtr after an insert that grows" {
     p.* = 101;
     try testing.expectEqual(@as(?u32, 101), m.get(k));
 }
+
+const OracleEntry = struct { key: SlotMap(u32).Key, val: u32 };
+
+const Op = enum { insert, remove_live, get_live, getptr_mutate_live, touch_stale };
+
+// Drives a random sequence of operations against SlotMap(u32) and checks it
+// against a black-box oracle (a live-key model + a stale-key list). Generic over
+// `Source` so the same logic runs from a seeded PRNG and from std.testing.Smith.
+fn runSequence(comptime Source: type, src: *Source, gpa: std.mem.Allocator) !void {
+    var map = try SlotMap(u32).init(gpa);
+    defer map.deinit();
+
+    var live: std.ArrayList(OracleEntry) = .empty;
+    defer live.deinit(gpa);
+    var stale: std.ArrayList(SlotMap(u32).Key) = .empty;
+    defer stale.deinit(gpa);
+
+    while (!src.done()) {
+        var op = src.nextOp();
+        // Empty-collection guard: remap ops with an empty target to `insert`,
+        // else index(0) would panic (and read as a false fuzzer crash).
+        switch (op) {
+            .remove_live, .get_live, .getptr_mutate_live => if (live.items.len == 0) {
+                op = .insert;
+            },
+            .touch_stale => if (stale.items.len == 0) {
+                op = .insert;
+            },
+            .insert => {},
+        }
+
+        switch (op) {
+            .insert => {
+                const v = src.value();
+                const k = try map.insert(v);
+                try testing.expectEqual(@as(?u32, v), map.get(k));
+                try testing.expect(map.contains(k));
+                try live.append(gpa, .{ .key = k, .val = v });
+            },
+            .remove_live => {
+                const i = src.index(live.items.len);
+                const e = live.items[i];
+                try testing.expectEqual(@as(?u32, e.val), map.remove(e.key));
+                _ = live.swapRemove(i);
+                try stale.append(gpa, e.key);
+            },
+            .get_live => {
+                const i = src.index(live.items.len);
+                const e = live.items[i];
+                try testing.expectEqual(@as(?u32, e.val), map.get(e.key));
+                try testing.expect(map.contains(e.key));
+                const p = map.getPtr(e.key) orelse return error.TestExpectedNonNull;
+                try testing.expectEqual(e.val, p.*);
+            },
+            .getptr_mutate_live => {
+                const i = src.index(live.items.len);
+                const nv = src.value();
+                const p = map.getPtr(live.items[i].key) orelse return error.TestExpectedNonNull;
+                p.* = nv;
+                live.items[i].val = nv;
+            },
+            .touch_stale => {
+                const i = src.index(stale.items.len);
+                const k = stale.items[i];
+                try testing.expect(map.get(k) == null);
+                try testing.expect(map.getPtr(k) == null);
+                try testing.expect(!map.contains(k));
+                try testing.expect(map.remove(k) == null);
+            },
+        }
+
+        // Invariants after every op.
+        try testing.expectEqual(live.items.len, map.count());
+        for (live.items) |e| {
+            try testing.expectEqual(@as(?u32, e.val), map.get(e.key));
+            try testing.expect(map.contains(e.key));
+        }
+        // The iterator yields exactly the live set (compare as a set on index).
+        var seen = std.AutoHashMap(u32, u32).init(gpa);
+        defer seen.deinit();
+        var it = map.iterator();
+        var n: usize = 0;
+        while (it.next()) |entry| {
+            try seen.put(entry.key.index, entry.value_ptr.*);
+            n += 1;
+        }
+        try testing.expectEqual(live.items.len, n);
+        for (live.items) |e| {
+            try testing.expectEqual(@as(?u32, e.val), seen.get(e.key.index));
+        }
+    }
+}
+
+const PrngSource = struct {
+    random: std.Random,
+    remaining: usize,
+
+    fn done(self: *PrngSource) bool {
+        if (self.remaining == 0) return true;
+        self.remaining -= 1;
+        return false;
+    }
+    fn nextOp(self: *PrngSource) Op {
+        return self.random.enumValueWithIndex(Op, usize);
+    }
+    fn value(self: *PrngSource) u32 {
+        return self.random.int(u32);
+    }
+    fn index(self: *PrngSource, len: usize) usize {
+        return self.random.uintLessThan(usize, len);
+    }
+};
+
+test "property: random op sequences match the oracle" {
+    const seeds = [_]u64{ 0x1234, 0xdeadbeef, 0xcafef00d, 1, 42, 99_999 };
+    for (seeds) |seed| {
+        var prng = std.Random.DefaultPrng.init(seed);
+        var src = PrngSource{ .random = prng.random(), .remaining = 500 };
+        try runSequence(PrngSource, &src, testing.allocator);
+    }
+}
