@@ -82,8 +82,8 @@ allocates a new array, copies, and frees the old one.
 
 ### Pointer semantics — important and subtle
 
-`getPtr` and `iterator` hand out pointers into the slot array. **Those pointers are
-valid only until the next mutation that reallocates.** Because `insert` may trigger
+`getPtr`, `iterator`, and `valueIterator` hand out pointers into the slot array.
+**Those pointers are valid only until the next mutation that reallocates.** Because `insert` may trigger
 `grow()`, and `grow()` replaces the whole backing array, a pointer held across an
 `insert` can dangle:
 
